@@ -1,5 +1,4 @@
 import os
-import json
 from PIL import Image
 from celery import Celery
 from sqlalchemy import create_engine
@@ -7,37 +6,29 @@ from sqlalchemy.orm import sessionmaker
 from config import  Settings
 from models import ConversionJob, ConversionStatus
 from redis import Redis
+import json
+
 
 settings = Settings()
 
-redis_client = Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT,decode_responses=True)
-
 celery_app = Celery('tasks', broker=f'amqp://{settings.RABBITMQ_USER}:{settings.RABBITMQ_PASS}@rabbitmq:5672//')
+
+redis_client = Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT,decode_responses=True)
 
 engine = create_engine(settings.DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 @celery_app.task
-def convert_image(job_id: str, output_format: str):
+def convert_image(job_id: str, output_format: str,session_id: str):
     db = SessionLocal()
-    redis_key = f"job_status:{job_id}"
     print('reached inside function convert_image',job_id,output_format)
     try:
       
         job = db.query(ConversionJob).filter(ConversionJob.id == job_id).first()
         if not job:
             raise ValueError(f"Job {job_id} not found")
-        
 
-        status_data = {
-            "status": ConversionStatus.PROCESSING,
-            "input_path": f"/uploads/{job.input_path}",
-            "output_path": None,
-            "output_format": output_format,
-            "error": None
-        }
-
-        redis_client.set(redis_key,json.dumps(status_data))
+       
         job.status = ConversionStatus.PROCESSING
         db.commit()
 
@@ -67,27 +58,39 @@ def convert_image(job_id: str, output_format: str):
         job.output_format = output_format
         db.commit()
 
-        status_data.update({
-            "status": ConversionStatus.COMPLETED,
-            "output_path": f"/converted/{job.output_path}"
-        })
+        status_data = {
+                "status": ConversionStatus.COMPLETED,
+                "session_id": session_id,
+                "job_id":job_id,
+                "output_path": f"/converted/{job.output_path}",
+                "output_format": output_format,
+                "error": None
+            }
 
-        redis_client.set(redis_key,json.dumps(status_data))
+        redis_client.publish(
+            f'task_status_{session_id}',
+            json.dumps(status_data)
+        )
 
         return {"status": "success", "output_path": job.output_path}
 
     except Exception as e:
 
-        print('error frommworkewr',e)
-
         status_data = {
-            "status": ConversionStatus.FAILED,
-            "input_path": f"/uploads/{job.input_path}",
-            "output_path": None,
-            "output_format": output_format,
-            "error": str(e)
-        }
-        redis_client.set(redis_key, json.dumps(status_data))
+                "status": ConversionStatus.FAILED,
+                "session_id": session_id,
+                "job_id":job_id,
+                "output_path": None,
+                "output_format": output_format,
+                "error": str(e)
+            }
+        
+
+        redis_client.publish(
+            f'task_status_{session_id}',
+            json.dumps(status_data)
+        )
+
         job.status = ConversionStatus.FAILED
         job.error_message = str(e)
         db.commit()

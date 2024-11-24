@@ -14,8 +14,8 @@ class ImageService:
         self.settings = settings
         self.redis = Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT,decode_responses=True)
 
-    def _get_redis_key(self, job_id: str) -> str:
-        return f"job_status:{job_id}"
+    def _get_redis_key(self, session_id: str) -> str:
+        return f"task_status_{session_id}"
 
     async def validate_image(self, file: UploadFile) -> bool:
         if file.size > self.settings.MAX_FILE_SIZE:
@@ -31,6 +31,7 @@ class ImageService:
             self,
             files: List[UploadFile],
             output_format: str,
+            session_id:str,
             db : Session
     ):
         if output_format.lower() not in self.settings.ALLOWED_FORMATS:
@@ -39,7 +40,7 @@ class ImageService:
         results = []
 
         for file in files:
-            result = await self._process_single_file(file, output_format, db)
+            result = await self._process_single_file(file, output_format,session_id, db)
             results.append(result)
 
         return {"success": True, "jobs": results}
@@ -49,6 +50,7 @@ class ImageService:
             self,
             file:UploadFile,
             output_format:str,
+            session_id:str,
             db:Session
     ):
         input_path = None
@@ -78,20 +80,23 @@ class ImageService:
             # Add initial status to Redis
             status_data = {
                 "status": ConversionStatus.QUEUED,
+                "session_id": session_id,
+                "job_id":job_id,
                 "input_path": f"/uploads/{input_filename}",
                 "output_path": None,
                 "output_format": output_format,
                 "error": None
             }
 
-            self.redis.set(self._get_redis_key(job_id),
+            self.redis.publish(self._get_redis_key(session_id),
                            json.dumps(status_data))
 
 
-            convert_image.delay(job_id,output_format)
+            convert_image.delay(job_id,output_format,session_id)
 
             return {
                 'job_id': job_id,
+                'session_id':session_id,
                 'filename': file.filename,
                 'status': 'queued'
             }
@@ -105,42 +110,3 @@ class ImageService:
         
         finally:
             await file.close()
-
-    async def get_status(self,job_id:str,db:Session):
-
-        redis_key = self._get_redis_key(job_id)
-        status_data = self.redis.get(redis_key)
-
-        if status_data:
-            print('Got data from redis')
-            return json.loads(status_data)
-        print('Data missing querried DB')
-        # this will only run if not in redis
-        job = db.query(ConversionJob).filter(ConversionJob.id == job_id).first()
-
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
-        
-        return {
-            "status": job.status,
-            "input_path": f"/uploads/{job.input_path}",
-            "output_path": f"/converted/{job.output_path}" if job.output_path else None,
-            "output_format": job.output_format,
-            "error": job.error_message
-        }
-    
-    async def list_jobs(self,db:Session):
-        jobs = db.query(ConversionJob).order_by(ConversionJob.created_at.desc()).all()
-
-        return [
-            {
-                "job_id": job.id,
-                "status": job.status,
-                "input_path": f"/uploads/{job.input_path}",
-                "output_path": f"/converted/{job.output_path}" if job.output_path else None,
-                "output_format": job.output_format,
-                "created_at": job.created_at,
-                "error": job.error_message
-            }
-            for job in jobs
-        ]

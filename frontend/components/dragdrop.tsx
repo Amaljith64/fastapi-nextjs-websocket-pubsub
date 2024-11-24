@@ -1,5 +1,4 @@
-'use client'
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import axios,{AxiosError} from 'axios';
 import { FileImage, UploadCloud, X, Download, CheckCircle, AlertCircle, Clock } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
@@ -15,7 +14,23 @@ interface FileUploadProgress {
   status: 'queued' | 'uploading' | 'processing' | 'completed' | 'failed';
   convertedUrl?: string;
   error?: string;
+  job_id?: string;
 }
+
+
+interface ConversionStatus {
+  job_id: string;
+  status: 'completed' | 'error';
+  output_path?: string;
+  error?: string;
+  session_id?:string;
+  type:string;
+}
+
+interface JobMapping {
+  [key: string]: string;
+}
+
 
 const ImageColor = {
   fillColor: 'fill-purple-600',
@@ -56,6 +71,56 @@ export default function ImageUpload() {
   const [filesToUpload, setFilesToUpload] = useState<FileUploadProgress[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [selectedFormat, setSelectedFormat] = useState('jpeg');
+  const [connected, setConnected] = useState(false);
+
+
+  useEffect(() => {
+    const ws = new WebSocket(`${BACKEND_URL.replace(/^http/, 'ws')}/ws`);
+
+    ws.onopen = () => {
+      setConnected(true);
+      console.log('Successfully connected to conversion service');
+    };
+
+    ws.onmessage = (event) => {
+      const status: ConversionStatus = JSON.parse(event.data);
+      console.log('WebSocket message received:', status);
+
+      if (status.type === 'session_id' && status.session_id) {
+        localStorage.setItem('session_id', status.session_id);
+        // return;
+      }
+
+      if (status.job_id) {
+        setUploadedFiles(prev => prev.map(file => {
+          if (file.job_id === status.job_id) {
+            return {
+              ...file,
+              status: status.status === 'completed' ? 'completed' : 
+                      status.status === 'error' ? 'failed' : 
+                      status.status as FileUploadProgress['status'],
+              convertedUrl: status.output_path,
+              error: status.error
+            };
+          }
+          return file;
+        }));
+
+        if (status.status === 'completed') {
+          console.log('Image conversion completed:', status.job_id);
+        } else if (status.status === 'error') {
+          console.log('Conversion failed:', status.error);
+        }
+      }
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+      console.log('Connection to conversion service lost');
+    };
+
+    return () => ws.close();
+  }, []);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const newFiles = acceptedFiles.map((file) => ({
@@ -92,39 +157,17 @@ export default function ImageUpload() {
     }
   };
 
-  const pollJobStatus = async (jobId: string, file: FileUploadProgress) => {
-    const updateFileStatus = (status: FileUploadProgress['status'], convertedUrl?: string, error?: string) => {
-      setUploadedFiles(prev => 
-        prev.map(f => 
-          f.File === file.File 
-            ? { ...f, status, convertedUrl, error }
-            : f
-        )
-      );
-    };
-
-    try {
-      const response = await axios.get(`${BACKEND_URL}/api/status/${jobId}`);
-      const { status, output_path, error } = response.data;
-
-      if (status === 'completed') {
-        updateFileStatus('completed', output_path);
-      } else if (status === 'failed') {
-        updateFileStatus('failed', undefined, error);
-      } else {
-        updateFileStatus('processing');
-        setTimeout(() => pollJobStatus(jobId, file), 2000);
-      }
-    } catch {
-      updateFileStatus('failed', undefined, 'Failed to check conversion status');
-    }
-  };
-
   const handleSubmit = async () => {
     setError(null);
     const formData = new FormData();
     filesToUpload.forEach(file => formData.append('files', file.File));
     formData.append("output_format", selectedFormat);
+
+    const sessionId = localStorage.getItem('session_id');
+
+    if (sessionId) {
+      formData.append('session_id', sessionId);
+    }
 
     try {
       setFilesToUpload(prev => prev.map(file => ({ ...file, status: 'uploading' })));
@@ -138,13 +181,16 @@ export default function ImageUpload() {
       });
 
       if (response.data.success) {
-        const newUploadedFiles = filesToUpload.map(file => ({ ...file, status: 'processing' as const }));
+
+        const newJobMapping: JobMapping = {};
+        response.data.jobs.forEach((job: { job_id: string, filename: string }) => {
+          newJobMapping[job.job_id] = job.filename;
+        });
+
+        const newUploadedFiles = filesToUpload.map((file,index) => ({ ...file, status: 'processing' as const,job_id:response.data.jobs[index].job_id }));
         setUploadedFiles(prev => [...prev, ...newUploadedFiles]);
         setFilesToUpload([]);
 
-        response.data.jobs.forEach((job: { job_id: string }, index: number) => {
-          pollJobStatus(job.job_id, newUploadedFiles[index]);
-        });
       }
     } catch(error) {
       const errorMessage = error instanceof AxiosError 
@@ -166,6 +212,16 @@ export default function ImageUpload() {
         </Alert>
       )}
 
+       <h1 className="text-3xl font-bold mb-6">Wedsocket Connection</h1>
+      
+      <div className="mb-4">
+        <div className={`inline-flex items-center px-3 py-1 rounded-full text-sm ${
+          connected ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+        }`}>
+          {connected ? '🟢 Connected' : '🔴 Disconnected'}
+        </div>
+      </div>
+
       <div className="mb-6">
         <label
           {...getRootProps()}
@@ -182,15 +238,15 @@ export default function ImageUpload() {
               Click to upload files (files should be under 10 MB)
             </p>
           </div>
-        </label>
 
+            </label>
         <Input
           {...getInputProps()}
           id="dropzone-file"
           accept="image/png, image/jpeg"
           type="file"
           className="hidden"
-        />
+          />
       </div>
 
       {filesToUpload.length > 0 && (
