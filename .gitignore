@@ -26,8 +26,8 @@ Thumbs.db
 *.local
 
 # Environment files (can opt-in for committing if needed)
-.env*
-.env.*.local
+.env
+
 
 # Debug
 npm-debug.log*
