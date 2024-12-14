@@ -212,7 +212,7 @@ export default function ImageUpload() {
         </Alert>
       )}
 
-       <h1 className="text-3xl font-bold mb-6">Wedsocket Connection</h1>
+      <h1 className="text-3xl font-bold mb-6">Websocket System</h1>
       
       <div className="mb-4">
         <div className={`inline-flex items-center px-3 py-1 rounded-full text-sm ${
